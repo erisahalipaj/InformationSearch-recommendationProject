@@ -1,104 +1,84 @@
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import csr_matrix
 
 class MovieRecommender:
     def __init__(self):
-        self.users = None
         self.movies = None
         self.ratings = None
-        self.merged_data = None
-        self.LIKE_THRESHOLD = 3  # Define a constant for the "like" rating threshold
+        self.item_similarity = None
 
     def load_data(self):
-        # Define the path to the dataset files
-        users_path = r'C:\Users\USER\OneDrive\Documents\Semester 2\Information Search & Recommendation Systems\HW\Assignment4\users.dat'
-        movies_path = r'C:\Users\USER\OneDrive\Documents\Semester 2\Information Search & Recommendation Systems\HW\Assignment4\movies.dat'
-        ratings_path = r'C:\Users\USER\OneDrive\Documents\Semester 2\Information Search & Recommendation Systems\HW\Assignment4\ratings.dat'
-
-        # Load users data
-        users_columns = ['user_id', 'gender', 'age', 'occupation', 'zip_code']
-        self.users = pd.read_csv(users_path, sep='::', engine='python', names=users_columns, encoding='latin1')
+        movies_path = "D:/AAU_UDINE/Semester1/RecommendationSystems/ml-25m/ml-25m/movies.csv"
+        ratings_path = "D:/AAU_UDINE/Semester1/RecommendationSystems/ml-25m/ml-25m/ratings.csv"
 
         # Load movies data
-        movies_columns = ['movie_id', 'title', 'genres']
-        self.movies = pd.read_csv(movies_path, sep='::', engine='python', names=movies_columns, encoding='latin1')
+        self.movies = pd.read_csv(movies_path, encoding='latin1')
+        print("First movie in the dataset:", self.movies.iloc[0])
 
         # Load ratings data
-        ratings_columns = ['user_id', 'movie_id', 'rating', 'timestamp']
-        self.ratings = pd.read_csv(ratings_path, sep='::', engine='python', names=ratings_columns, encoding='latin1')
+        self.ratings = pd.read_csv(ratings_path, encoding='latin1')
+        print("Ratings data loaded. Sample:")
+        print(self.ratings.head())
 
-        # Merge the datasets
-        self.merged_data = pd.merge(pd.merge(self.ratings, self.users, on='user_id'), self.movies, on='movie_id')
+        # Downsample the ratings data for testing purposes
+        self.ratings = self.ratings.sample(frac=0.05, random_state=42)  # Further downsampling to 5%
+        print("Downsampled ratings data loaded. Sample:")
+        print(self.ratings.head())
 
-    def get_user_ratings(self, user_id):
+        # Filter movies with at least 50 ratings and users who have rated at least 50 movies
+        movie_counts = self.ratings['movieId'].value_counts()
+        user_counts = self.ratings['userId'].value_counts()
+        self.ratings = self.ratings[self.ratings['movieId'].isin(movie_counts[movie_counts >= 50].index)]
+        self.ratings = self.ratings[self.ratings['userId'].isin(user_counts[user_counts >= 50].index)]
 
-        user_ratings = self.merged_data[self.merged_data['user_id'] == int(user_id)]
+        print("Filtered ratings data loaded. Sample:")
+        print(self.ratings.head())
 
-        if user_ratings.empty:
-            print('No ratings for user {}'.format(user_id))
-        else:
-            print(user_ratings[['title', 'rating', 'genres']])
-        return user_ratings
-    def create_user_profile(self, user_id):
-        user_ratings = self.get_user_ratings(user_id)
-        liked_movies = user_ratings[user_ratings['rating'] > self.LIKE_THRESHOLD]
+    def calculate_item_similarity(self):
+        # Create a pivot table
+        movie_ratings = self.ratings.pivot(index='userId', columns='movieId', values='rating').fillna(0)
 
-        genre_counts = {}
-        for genres in liked_movies['genres']:
-            for genre in genres.split('|'):
-                if genre in genre_counts:
-                    genre_counts[genre] += 1
-                else:
-                     genre_counts[genre] = 1
-        print("User Profile based on liked genres:", genre_counts)
-        return genre_counts
+        # Create a sparse matrix
+        movie_ratings_matrix = csr_matrix(movie_ratings.values)
 
-    def calculate_genre_overlap(self,movies_genres,user_profile):
-        movies_genres_set = set(movies_genres.split('|'))
-        user_genre_set = set(user_profile.keys())
-        overlap = movies_genres_set.intersection(user_genre_set)
-        return len(overlap)
+        # Compute cosine similarity between items
+        self.item_similarity = cosine_similarity(movie_ratings_matrix.T)
 
-    def recommend_movies(self, user_id):
-        user_profile = self.create_user_profile(user_id)
-        if not user_profile:
+    def recommend_similar_movies(self, movie_title):
+        # Get the movie ID for the given movie title
+        if movie_title not in self.movies['title'].values:
+            print(f"Movie '{movie_title}' not found in the dataset.")
             return []
 
-        # Calculate popularity of each movie based on how often it's rated
-        movie_popularity = self.ratings['movie_id'].value_counts().to_dict()
+        movie_id = self.movies[self.movies['title'] == movie_title]['movieId'].values[0]
 
-        # Filter and score movies based on genre overlap and popularity
-        recommendations = []
-        for index, row in self.movies.iterrows():
-            if row['movie_id'] in movie_popularity:
-                overlap = self.calculate_genre_overlap(row['genres'], user_profile)
-                if overlap > 0:  # Only consider movies with at least some genre overlap
-                    popularity_score = movie_popularity[row['movie_id']]
-                    recommendations.append((row['title'], overlap, popularity_score))
+        # Find the index of the movie
+        movie_idx = self.movies[self.movies['movieId'] == movie_id].index[0]
 
-        # Debugging: Print sample recommendations to verify structure and types
-        print("Sample recommendations:", recommendations[:5])
+        # Get similarity scores for the movie
+        similarity_scores = self.item_similarity[movie_idx]
 
-        # Sort movies first by genre overlap then by popularity
-        try:
-            recommendations.sort(key=lambda x: (-x[1], -x[2]))
-        except Exception as e:
-            print("Error in sorting recommendations:", e)
-            return []
+        # Create a list of tuples (movie_id, similarity_score)
+        similar_movies = [(self.movies.iloc[idx]['title'], score) for idx, score in enumerate(similarity_scores) if idx != movie_idx]
 
-        # Return the top 10 recommendations
-        top_recommendations = recommendations[:10]
-        return [title for title, overlap, popularity in top_recommendations]
+        # Sort the movies based on similarity score
+        similar_movies.sort(key=lambda x: x[1], reverse=True)
 
+        # Get the top 10 similar movies
+        top_similar_movies = similar_movies[:10]
+
+        # Return the titles of the top 10 similar movies
+        return [title for title, score in top_similar_movies]
 
 def main():
     recommender = MovieRecommender()
     recommender.load_data()
-    user_id = input("Enter User ID: ")
+    recommender.calculate_item_similarity()
+    movie_title = input("Enter Movie Title: ")
     try:
-        user_ratings = recommender.get_user_ratings(user_id)
-        user_profile = recommender.create_user_profile(user_id)
-        recommendations = recommender.recommend_movies(user_id)
-        print("Top 10 Movie Recommendations:", recommendations)
+        recommendations = recommender.recommend_similar_movies(movie_title)
+        print("Top 10 Similar Movie Recommendations:", recommendations)
     except Exception as e:
         print("Error:", e)
 
